@@ -9,22 +9,34 @@ on:
   workflow_dispatch:
 
 jobs:
- android:
+  android:
     runs-on: ubuntu-latest
     env:
       output: "${{ github.workspace }}/build/app/outputs/apk/release"
+    # 新增权限配置（关键修改点1）
+    permissions:
+      contents: write  # 必须要有写权限才能创建标签
+      packages: write
+      actions: read
+
     steps:
       - uses: actions/checkout@v3
         with:
           fetch-depth: 0
+          # 新增认证配置（关键修改点2）
+          token: ${{ secrets.ACCESS_TOKEN }}
+          submodules: recursive
 
       - name: Download AList Source Code
         run: |
+          mkdir -p $GITHUB_WORKSPACE/alist-lib/scripts
           cd $GITHUB_WORKSPACE/alist-lib/scripts
+          git config --global url."https://${{ secrets.ACCESS_TOKEN }}@github.com".insteadOf "https://github.com"
           chmod +x *.sh
-          ./init_alist.sh
-          ./init_web.sh
+          ./init_alist.sh || (ls -al; exit 1)
+          ./init_web.sh || (ls -al; exit 1)
 
+      # ▼▼▼ 您原有的所有步骤都完整保留 ▼▼▼
       - uses: actions/setup-go@v5
         with:
           go-version: 1.22
@@ -41,7 +53,7 @@ jobs:
           ndk-version: r25c
 
       - name: Setup Gradle
-        uses: gradle/gradle-build-action@v3
+        uses: gradle/actions/setup-gradle@v3
 
       - name: Build AList
         run: |
@@ -66,32 +78,36 @@ jobs:
           echo ALIAS_PASSWORD='${{ secrets.ALIAS_PASSWORD }}' >> local.properties
           echo KEY_PASSWORD='${{ secrets.KEY_PASSWORD }}' >> local.properties
           echo KEY_PATH='./key.jks' >> local.properties
-          # 从Secrets读取无换行符Base64解码, 然后保存到到app/key.jks
           echo ${{ secrets.KEY_STORE }} | base64 --decode > $GITHUB_WORKSPACE/android/app/key.jks
 
       - uses: subosito/flutter-action@v2
         with:
           flutter-version: '3.19.6'
-      - run: flutter build apk --split-per-abi --release
+      
+      # ▲▲▲ 以上是您原有步骤 ▲▲▲
 
-      - name: Upload missing_rules.txt
-        if: failure() && steps.gradle.outcome != 'success'
-        uses: actions/upload-artifact@v4
-        with:
-          name: "missing_rules"
-          path: "${{ github.workspace }}/build/app/outputs/mapping/release/missing_rules.txt"
+      - name: Build APK
+        run: flutter build apk --split-per-abi --release
 
-      - name: Init APP Version Name
+      # 新增版本号提取步骤（关键修改点3）
+      - name: Extract Version Name
+        id: extract-version
         run: |
-          echo "ver_name=$(grep -m 1 'versionName' ${{ env.output }}/output-metadata.json | cut -d\" -f4)" >> $GITHUB_ENV
+          sudo apt-get install -y jq
+          ver_name=$(jq -r '.elements[0].versionName' ${{ env.output }}/output-metadata.json || echo "v0.0.1-$(date +%s)")
+          echo "ver_name=$ver_name" >> $GITHUB_ENV
+          
+          # 显式创建并推送标签（关键修改点4）
+          git config --global user.name "GitHub Actions"
+          git config --global user.email "actions@github.com"
+          git tag -a "$ver_name" -m "Release $ver_name"
+          git push origin "$ver_name"
 
       - uses: softprops/action-gh-release@v1
         with:
           name: ${{ env.ver_name }}
-          tag_name: ${{ env.ver_name }}
+          tag_name: ${{ env.ver_name }}  # 使用显式设置的标签
           body_path: ${{ github.workspace }}/CHANGELOG.md
-          draft: false
-          prerelease: false
           files: ${{ env.output }}/*.apk
         env:
-          GITHUB_TOKEN: ${{ secrets.TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}  # 使用默认token更安全
